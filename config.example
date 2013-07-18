@@ -1,0 +1,13 @@
+---
+server: irc.freenode.net
+port: 6666
+ircname: shelly cooper
+username: shellbot
+nick: shellbot
+# nickserv: nickservpswd
+# sslcrt: nick.crt
+# sslkey: nick.key
+authorizations:
+  - '~fully@authorized/personal'
+channels:
+  - '#shellbot'

@@ -1,0 +1,386 @@
+#!/usr/bin/env perl
+
+package Shellbot;
+
+use strict;
+use warnings;
+
+use POE qw(Wheel::Run);
+use POE::Component::IRC::State;
+use POE::Component::IRC::Plugin::AutoJoin;
+use POE::Component::IRC::Plugin::BotAddressed;
+use POE::Component::IRC::Plugin::Connector;
+use Data::Dumper;
+use Time::SoFar qw(runtime figuretimes);
+use File::Basename qw(dirname);
+use File::Temp ();
+use Shell qw(hostname uptime);
+use YAML qw(LoadFile DumpFile);
+
+# Version
+my $VERSION = "0.1";
+
+# Load config file
+my $config_file = $ARGV[0];
+die "please specify config file" unless defined($config_file);
+die "please specify correct path to config" unless(-e $config_file);
+my ($config, $commands) = LoadFile($config_file);
+# Change working directory to config dir
+chdir dirname($config_file);
+
+# commands
+if(!defined($commands)){
+    $commands = {}; 
+}
+
+POE::Session->create(
+    package_states => [
+        Shellbot => [ qw(_start _default irc_join irc_msg irc_bot_addressed irc_connected got_job_stdout got_job_stderr got_job_close got_child_signal) ]
+    ]
+);
+
+POE::Kernel->run();
+
+sub _start {
+    my ($kernel, $heap) = @_[KERNEL ,HEAP];
+
+    # IRC State
+    my %opts = (
+        Nick   => $config->{'nick'},
+        Username => $config->{'username'},
+        Ircname => $config->{'ircname'},
+        Server => $config->{'server'},
+    );
+
+    # Specify port
+    if(exists($config->{'port'})){
+        $opts{'Port'} = $config->{'port'};
+    }
+
+    # UseSSL if SSLKey and SSLCrt specified
+    if(exists($config->{'sslkey'}) && exists($config->{'sslcrt'})){
+        $opts{'UseSSL'} = 1;
+        $opts{'SSLKey'} = $config->{'sslkey'};
+        $opts{'SSLCrt'} = $config->{'sslcrt'};
+    }
+
+    my $irc = POE::Component::IRC::State->spawn(%opts);
+    $heap->{irc} = $irc;
+
+    # Connector plugin
+    $heap->{connector} = POE::Component::IRC::Plugin::Connector->new();
+    $irc->plugin_add( 'Connector' => $heap->{connector} );
+ 
+    # Autojoin plugin
+    if($config->{'channels'} > 0){
+        $irc->plugin_add('AutoJoin', POE::Component::IRC::Plugin::AutoJoin->new(
+           Channels => $config->{'channels'}
+        ));
+    }
+
+    # BotAddressed plugin
+    $irc->plugin_add( 'BotAddressed', POE::Component::IRC::Plugin::BotAddressed->new() );
+
+    $irc->yield(register => qw(join msg connected));
+    $irc->yield('connect');
+}
+
+sub irc_connected {
+    my ($irc, $heap) = ($_[SENDER]->get_heap(), $_[HEAP]);
+    $heap->{connecttime} = time();
+    print "[irc_connected] connected to server\n";
+    
+    if($config->{'nickserv'}){
+        $irc->yield(nickserv => ('identify', $config->{'nickserv'}));
+    }
+}
+
+sub run_job {
+    my ($irc, $heap, $kernel, $channel, $cmd) = @_;
+
+    my $program = "/bin/bash";
+    if(exists($config->{'shell'})){
+        $program = $config->{'shell'};
+    }
+
+    # create a temporary script
+    my $script = File::Temp->new();
+    my $scriptname = $script->filename;
+    if(ref $cmd eq 'ARRAY'){
+        foreach my $line (@{ $cmd }){
+            print $script "$line\n";
+        }
+    }else{
+        print $script $cmd;
+    }
+    $program .= " $scriptname";
+
+    if(!exists($heap->{job})){
+        my $job = POE::Wheel::Run->new(
+            Program      => $program,
+            StdioFilter  => POE::Filter::Line->new(),
+            StderrFilter => POE::Filter::Line->new(),
+            StdoutEvent  => "got_job_stdout",
+            StderrEvent  => "got_job_stderr",
+            CloseEvent   => "got_job_close",
+        );
+
+        $kernel->sig_child($job->PID, "got_child_signal");
+
+        $heap->{job} = $job;
+        $heap->{jobchannel} = $channel;
+        $heap->{script} = $script;
+    }else{
+        $irc->yield(privmsg => $channel, "job already running, can't execute more");
+    }
+}
+
+sub kill_job {
+    my ($irc, $heap, $channel, $sig) = @_;
+
+    if(exists($heap->{job})){
+        if(!$sig){
+            $sig = 'TERM';
+        }
+        $heap->{job}->kill($sig);
+        $irc->yield(privmsg => $channel, "signal $sig sent to job");
+    }else{
+        $irc->yield(privmsg => $channel, "no job running");
+    }
+}
+
+sub got_job_stdout {
+    my $heap = $_[HEAP];
+    my $channel = $heap->{jobchannel};
+    my @lines = split /\n/, $_[ARG0];
+    my $irc = $heap->{irc};
+    foreach my $line (@lines){
+        $irc->yield(privmsg => $channel, $line);
+    }
+}
+
+sub got_job_stderr {
+    my $heap = $_[HEAP];
+    my $channel = $heap->{jobchannel};
+    my @lines = split /\n/, $_[ARG0];
+    my $irc = $heap->{irc};
+    foreach my $line (@lines){
+        $irc->yield(privmsg => $channel, $line);
+    }
+}
+
+sub got_job_close {
+     my $heap = $_[HEAP];
+     my $channel = $heap->{jobchannel};
+     my $irc = $heap->{irc};
+     if(exists($heap->{job})){
+         delete $heap->{job};
+         my $scriptname = $heap->{script}->filename;
+         close $heap->{script};
+         # remove temporary file
+         if(-e $scriptname){
+             unlink $scriptname;
+         }
+         $irc->yield(privmsg => $channel, "job ended");
+     }
+}
+
+sub got_child_signal {
+    got_job_close @_;
+}
+
+sub msg_received {
+    my ($irc, $heap, $kernel, $nick, $name, $channel, $msg) = @_;
+
+    if(is_authorized($name)){
+        print "$nick:$name authorized on $channel addressed me '$msg'\n";
+        my $priv = ($channel ? $channel : $nick);
+        if(exists($heap->{cmd})){
+            if($msg =~ /^\s*#end\s*/){
+                $commands->{$heap->{cmd}} = [$heap->{desc}, $heap->{code}];
+                DumpFile($config_file, ($config, $commands));
+                $irc->yield(privmsg => $priv, "$heap->{cmd} remembered");
+                delete $heap->{cmd};
+                delete $heap->{desc};
+                delete $heap->{code};
+            } elsif($msg =~ /^\s*#canc(?:el)?\s*/){
+                $irc->yield(privmsg => $priv, "$heap->{cmd} canceled");
+                delete $heap->{cmd};
+                delete $heap->{desc};
+                delete $heap->{code};
+            } elsif($msg =~ /^\s*#sh\s*/){
+                if(@{ $heap->{code} } > 0){
+                    my $i = 1;
+                    foreach my $line (@{ $heap->{code} }){
+                        $irc->yield(privmsg => $priv, "$i: $line");
+                        $i++;
+                    }
+                }else{
+                    $irc->yield(privmsg => $priv, "empty command");
+                }
+            } elsif($msg =~ /^\s*#ed(?:it)?\s+(\d+)\s{1}(.*)/){
+                if($1 <= @{ $heap->{code} }){
+                    $heap->{code}->[$1-1] = $2; 
+                    $irc->yield(privmsg => $priv, "line $1 edited");
+                }
+            } elsif($msg =~ /^\s*#ins(?:ert)?\s+(\d+)\s{1}(.*)/){
+                if($1 <= @{ $heap->{code} }){
+                    splice @{ $heap->{code} }, $1-1, 0, $2; 
+                    $irc->yield(privmsg => $priv, "line $1 inserted");
+                }
+            } elsif($msg =~ /^\s*#del(?:ete)?\s+(\d+)/){
+                if($1 <= @{ $heap->{code} }){
+                    splice @{ $heap->{code} }, $1-1, 1;
+                    $irc->yield(privmsg => $priv, "line $1 deleted");
+                }
+            } else{
+                push @{ $heap->{code} }, $msg;
+            }
+        } elsif($msg =~ /^\s*msg\s+([^ ]*)\s+(.*)/){
+            $irc->yield(privmsg => $1, $2);
+        } elsif($msg =~ /^\s*(?:ls|list|commands){1}\s*/){
+            if(!(scalar keys %$commands)){
+                $irc->yield(privmsg => $priv, "no commands");
+            }else{
+                foreach my $command (keys %$commands){
+                    my $desc = $commands->{$command}->[0];
+                    $irc->yield(privmsg => $priv, "$command $desc");
+                }
+            }
+        } elsif($msg =~ /^\s*(?:edit|remember){1}\s+(.*)/){
+            if($1 =~ /([^ ]+)\s*(.*)/){
+                my $cmd = $1;
+                my $desc = $2;
+                $heap->{cmd} = $cmd;
+                $heap->{desc} = $desc;
+                if(exists($commands->{$cmd})){
+                    $heap->{code} = [ map { $_; } @{ $commands->{$cmd}->[1] } ];
+                }else{
+                    $heap->{code} = [];
+                }
+                $irc->yield(privmsg => $priv, "remembering $cmd $desc");
+            }else{
+                $irc->yield(privmsg => $priv, "please specify command name");
+            }
+        } elsif($msg =~ /^\s*sh(?:ow)?\s+([^ ]+)/){
+            my $cmd = $1;
+            if(exists($commands->{$cmd})){
+                my @code = @{ $commands->{$cmd}->[1] };
+                if(@code > 0){
+                    my $i = 1;
+                    foreach my $line (@code){
+                        $irc->yield(privmsg => $priv, "$i: $line");
+                        $i++;
+                    }
+                }else{
+                    $irc->yield(privmsg => $priv, "empty command");
+                }
+            }else{
+                $irc->yield(privmsg => $priv, "no such command");
+            }
+        } elsif($msg =~ /^\s*run\s+([^ ]+)/){
+            my $cmd = $1;
+            if(exists($commands->{$cmd})){
+                my @code = @{ $commands->{$cmd}->[1] };
+                run_job $irc, $heap, $kernel, $priv, \@code;
+            }else{
+                $irc->yield(privmsg => $priv, "no such command");
+            }
+        } elsif($msg =~ /^\s*forget\s+([^ ]*)\s*/){
+            my $cmd = $1;
+            if(exists($commands->{$cmd})){
+                delete $commands->{$cmd};
+                DumpFile($config_file, ($config, $commands));
+                $irc->yield(privmsg => $priv, "$cmd forgotten");
+            }else{
+                $irc->yield(privmsg => $priv, "no such command $cmd");
+            }
+        } elsif($msg =~ /^\s*!(.*)/){
+            run_job $irc, $heap, $kernel, $priv, $1;
+        } elsif($msg =~ /^\s*kill(.*)/){
+            kill_job $irc, $heap, $priv, $1;
+        } elsif($msg =~ /^\s*nick\s+([^ ]*)/){
+            $irc->yield(nick => $1);
+        } elsif($msg =~ /^\s*quit\s*/){
+            $irc->yield(shutdown => 'bye bye!');
+        } elsif($msg =~ /^\s*status\s*/){
+            my $host = hostname();
+            my $up = uptime();
+            chomp $host;
+            chomp $up;
+            my $rt = runtime();
+            my $ct = figuretimes(time()-$heap->{connecttime});
+            my $ssl = exists($config->{sslcrt}) && exists($config->{sslkey}) ? ' securely' : '';
+            $irc->yield(privmsg => $priv, "shellbot v$VERSION running for $rt");
+            $irc->yield(privmsg => $priv, "connected$ssl to $config->{server} for $ct");
+            $irc->yield(privmsg => $priv, "running on $host $up");
+            if(exists($heap->{job})){
+                $irc->yield(privmsg => $priv, "currently running a job");
+            }else{
+                $irc->yield(privmsg => $priv, "no jobs running");
+            }
+        }
+    } else {
+        if($channel){
+            $irc->yield(privmsg => $channel, "$nick: you are not authorized");
+        } else {
+            $irc->yield(privmsg => $nick, 'you are not authorized');
+        }
+        print "$nick:$name not authorized on $channel addressed me '$msg'\n";
+    }
+}
+
+sub is_authorized {
+    my $name = $_[0];
+    return grep { $_ eq $name } @{ $config->{'authorizations'} };
+}
+
+sub irc_msg {
+    my $irc = $_[SENDER]->get_heap();
+    my @nick = ( split /!/, $_[ARG0] );
+    my $msg = $_[ARG2];
+    my $heap = $_[HEAP];
+    my $kernel = $_[KERNEL];
+ 
+    msg_received $irc, $heap, $kernel, $nick[0], $nick[1], '', $msg;
+}
+
+sub irc_bot_addressed {
+    my $irc = $_[SENDER]->get_heap();
+    my @nick = ( split /!/, $_[ARG0] );
+    my $channel = $_[ARG1]->[0];
+    my $msg = $_[ARG2];
+    my $heap = $_[HEAP];
+    my $kernel = $_[KERNEL];
+ 
+    msg_received $irc, $heap, $kernel, $nick[0], $nick[1], $channel, $msg;
+}
+
+sub irc_join {
+    my $nick = (split /!/, $_[ARG0])[0];
+    my $channel = $_[ARG1];
+    my $irc = $_[SENDER]->get_heap();
+ 
+    # only send the message if we were the one joining
+    if ($nick eq $irc->nick_name()) {
+        $irc->yield(privmsg => $channel, 'Hi everybody!');
+    }
+}
+
+# We registered for all events, this will produce some debug info.
+sub _default {
+    my ($event, $args) = @_[ARG0 .. $#_];
+    my @output = ( "[$event] " );
+ 
+    for my $arg (@$args) {
+        if (ref $arg eq 'ARRAY') {
+            push(@output, '[' . join(', ', @$arg ) . ']');
+        } else {
+            if($arg){
+                push(@output, "'$arg'");
+            }
+        }
+    }
+    print join ' ', @output, "\n";
+    return;
+}
