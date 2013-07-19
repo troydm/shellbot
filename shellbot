@@ -10,7 +10,8 @@ use POE::Component::IRC::State;
 use POE::Component::IRC::Plugin::AutoJoin;
 use POE::Component::IRC::Plugin::BotAddressed;
 use POE::Component::IRC::Plugin::Connector;
-use Data::Dumper;
+use Proc::Daemon;
+use Time::Piece;
 use Time::SoFar qw(runtime figuretimes);
 use File::Basename qw(dirname);
 use File::Temp ();
@@ -33,13 +34,50 @@ if(!defined($commands)){
     $commands = {}; 
 }
 
-POE::Session->create(
-    package_states => [
-        Shellbot => [ qw(_start _default irc_join irc_msg irc_bot_addressed irc_connected got_job_stdout got_job_stderr got_job_close got_child_signal) ]
-    ]
-);
+my $log_file = '/dev/null';
+if(exists($config->{'log'})){
+    $log_file = $config->{'log'}; 
+}
 
-POE::Kernel->run();
+my $pid = 0;
+
+if(exists($config->{'daemon'})){
+    my $daemon = Proc::Daemon->new(
+        work_dir     => dirname($config_file),
+        child_STDOUT => $log_file,
+        child_STDERR => $log_file);
+    $pid = $daemon->Init;
+}
+
+my $stdredirected = 0;
+my $stdout;
+my $stderr;
+my $log;
+
+if (!$pid){
+    # redirect stdout and stderr
+    if(!exists($config->{'daemon'}) && exists($config->{'log'})){
+        open($log, "+>","$log_file");
+        $stdout = *STDOUT;
+        $stderr = *STDERR;
+        *STDERR = $log;
+        *STDOUT = $log;
+        $stdredirected = 1;
+    }
+
+    POE::Session->create(
+        package_states => [
+            Shellbot => [ qw(_start _default irc_join irc_msg irc_bot_addressed irc_connected got_job_stdout got_job_stderr got_job_close got_child_signal) ]
+        ]
+    );
+
+    POE::Kernel->run();
+}
+
+sub printl {
+    my $date = Time::Piece->new->strftime('%m/%d/%Y %H:%M:%S');
+    print "[$date]$_[0]";
+}
 
 sub _start {
     my ($kernel, $heap) = @_[KERNEL ,HEAP];
@@ -88,7 +126,7 @@ sub _start {
 sub irc_connected {
     my ($irc, $heap) = ($_[SENDER]->get_heap(), $_[HEAP]);
     $heap->{connecttime} = time();
-    print "[irc_connected] connected to server\n";
+    printl "[irc_connected] connected to $config->{'server'}\n";
     
     if($config->{'nickserv'}){
         $irc->yield(nickserv => ('identify', $config->{'nickserv'}));
@@ -96,7 +134,7 @@ sub irc_connected {
 }
 
 sub run_job {
-    my ($irc, $heap, $kernel, $channel, $cmd) = @_;
+    my ($irc, $heap, $kernel, $channel, $cmd, $args) = @_;
 
     my $program = "/bin/bash";
     if(exists($config->{'shell'})){
@@ -113,9 +151,13 @@ sub run_job {
     }else{
         print $script $cmd;
     }
-    $program .= " $scriptname";
+    $program .= " $scriptname $args";
 
     if(!exists($heap->{job})){
+        if($stdredirected){
+            *STDOUT = $stdout;
+            *STDERR = $stderr;
+        }
         my $job = POE::Wheel::Run->new(
             Program      => $program,
             StdioFilter  => POE::Filter::Line->new(),
@@ -124,6 +166,10 @@ sub run_job {
             StderrEvent  => "got_job_stderr",
             CloseEvent   => "got_job_close",
         );
+        if($stdredirected){
+            *STDOUT = $log;
+            *STDERR = $log;
+        }
 
         $kernel->sig_child($job->PID, "got_child_signal");
 
@@ -193,7 +239,7 @@ sub msg_received {
     my ($irc, $heap, $kernel, $nick, $name, $channel, $msg) = @_;
 
     if(is_authorized($name)){
-        print "$nick:$name authorized on $channel addressed me '$msg'\n";
+        printl "[msg_received] $nick:$name authorized on $channel addressed me '$msg'\n";
         my $priv = ($channel ? $channel : $nick);
         if(exists($heap->{cmd})){
             if($msg =~ /^\s*#end\s*/){
@@ -278,11 +324,12 @@ sub msg_received {
             }else{
                 $irc->yield(privmsg => $priv, "no such command");
             }
-        } elsif($msg =~ /^\s*run\s+([^ ]+)/){
+        } elsif($msg =~ /^\s*run\s+([^ ]+)\s*(.*)/){
             my $cmd = $1;
+            my $args = $2;
             if(exists($commands->{$cmd})){
                 my @code = @{ $commands->{$cmd}->[1] };
-                run_job $irc, $heap, $kernel, $priv, \@code;
+                run_job $irc, $heap, $kernel, $priv, \@code, $args;
             }else{
                 $irc->yield(privmsg => $priv, "no such command");
             }
@@ -296,7 +343,7 @@ sub msg_received {
                 $irc->yield(privmsg => $priv, "no such command $cmd");
             }
         } elsif($msg =~ /^\s*!(.*)/){
-            run_job $irc, $heap, $kernel, $priv, $1;
+            run_job $irc, $heap, $kernel, $priv, $1, '';
         } elsif($msg =~ /^\s*kill(.*)/){
             kill_job $irc, $heap, $priv, $1;
         } elsif($msg =~ /^\s*nick\s+([^ ]*)/){
@@ -326,7 +373,7 @@ sub msg_received {
         } else {
             $irc->yield(privmsg => $nick, 'you are not authorized');
         }
-        print "$nick:$name not authorized on $channel addressed me '$msg'\n";
+        printl "[msg_received] $nick:$name not authorized on $channel addressed me '$msg'\n";
     }
 }
 
@@ -381,6 +428,6 @@ sub _default {
             }
         }
     }
-    print join ' ', @output, "\n";
+    printl join ' ', @output, "\n";
     return;
 }
