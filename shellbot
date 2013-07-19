@@ -282,8 +282,12 @@ sub msg_received {
             } else{
                 push @{ $heap->{code} }, $msg;
             }
-        } elsif($msg =~ /^\s*msg\s+([^ ]*)\s+(.*)/){
+        } elsif($msg =~ /^\s*msg\s+([^ ]+)\s+(.*)/){
             $irc->yield(privmsg => $1, $2);
+        } elsif($msg =~ /^\s*join\s+([^ ]+)\s*([^ ]*)/){
+            $irc->yield(join => $1, $2);
+        } elsif($msg =~ /^\s*part\s+([^ ]+)\s*/){
+            $irc->yield(part => $1);
         } elsif($msg =~ /^\s*(?:ls|list|commands){1}\s*/){
             if(!(scalar keys %$commands)){
                 $irc->yield(privmsg => $priv, "no commands");
@@ -293,7 +297,7 @@ sub msg_received {
                     $irc->yield(privmsg => $priv, "$command $desc");
                 }
             }
-        } elsif($msg =~ /^\s*he(?:lp)?\s*/){
+        } elsif($msg =~ /^\s*help\s*/){
             $irc->yield(privmsg => $priv, "shellbot v$VERSION IRC bot help");
             $irc->yield(privmsg => $priv, "  ls|list|commands - list remembered commands");
             $irc->yield(privmsg => $priv, "  !shell - run one line shell command");
@@ -310,6 +314,8 @@ sub msg_received {
             $irc->yield(privmsg => $priv, "  status - print bot status");
             $irc->yield(privmsg => $priv, "  nick nickname - change nick");
             $irc->yield(privmsg => $priv, "  msg nick msg - send private message to nick");
+            $irc->yield(privmsg => $priv, "  join channel [pass] - join channel");
+            $irc->yield(privmsg => $priv, "  part channel - part channel");
             $irc->yield(privmsg => $priv, "  quit - shutdown bot");
         } elsif($msg =~ /^\s*(?:edit|remember){1}\s+(.*)/){
             if($1 =~ /([^ ]+)\s*(.*)/){
