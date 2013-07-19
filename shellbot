@@ -293,6 +293,24 @@ sub msg_received {
                     $irc->yield(privmsg => $priv, "$command $desc");
                 }
             }
+        } elsif($msg =~ /^\s*he(?:lp)?\s*/){
+            $irc->yield(privmsg => $priv, "shellbot v$VERSION IRC bot help");
+            $irc->yield(privmsg => $priv, "  ls|list|commands - list remembered commands");
+            $irc->yield(privmsg => $priv, "  !shell - run one line shell command");
+            $irc->yield(privmsg => $priv, "  run command [args] - run remembered command");
+            $irc->yield(privmsg => $priv, "  kill [signal] - kill running job");
+            $irc->yield(privmsg => $priv, "  remember|edit|ed command [desc] - start remembering command mode");
+            $irc->yield(privmsg => $priv, "    #ed|#edit line shell - edit line");
+            $irc->yield(privmsg => $priv, "    #ins|#insert line shell - insert at line");
+            $irc->yield(privmsg => $priv, "    #del|#delete line - delete line");
+            $irc->yield(privmsg => $priv, "    #sh|#show - show remembered command so far");
+            $irc->yield(privmsg => $priv, "    #canc|#cancel - stop remembering command mode without saving command");
+            $irc->yield(privmsg => $priv, "    #end - stop remembering command mode and save command");
+            $irc->yield(privmsg => $priv, "  show command - print remembered command");
+            $irc->yield(privmsg => $priv, "  status - print bot status");
+            $irc->yield(privmsg => $priv, "  nick nickname - change nick");
+            $irc->yield(privmsg => $priv, "  msg nick msg - send private message to nick");
+            $irc->yield(privmsg => $priv, "  quit - shutdown bot");
         } elsif($msg =~ /^\s*(?:edit|remember){1}\s+(.*)/){
             if($1 =~ /([^ ]+)\s*(.*)/){
                 my $cmd = $1;
