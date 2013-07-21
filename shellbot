@@ -392,11 +392,11 @@ sub msg_received {
             }
         }
     } else {
-        if($channel){
-            $irc->yield(privmsg => $channel, "$nick: you are not authorized");
-        } else {
-            $irc->yield(privmsg => $nick, 'you are not authorized');
-        }
+        # if($channel){
+        #     $irc->yield(privmsg => $channel, "$nick: you are not authorized");
+        # } else {
+        #     $irc->yield(privmsg => $nick, 'you are not authorized');
+        # }
         printl "[msg_received] $nick:$name not authorized on $channel addressed me '$msg'\n";
     }
 }
