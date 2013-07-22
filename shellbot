@@ -144,6 +144,7 @@ sub run_job {
     # create a temporary script
     my $script = File::Temp->new();
     my $scriptname = $script->filename;
+    chmod 0700, $script;
     if(ref $cmd eq 'ARRAY'){
         foreach my $line (@{ $cmd }){
             print $script "$line\n";
