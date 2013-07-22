@@ -8,7 +8,7 @@ and supports only *nix operating systems (Linux, Solaris, BSD)
 install
 -------
 
-    cpanm POE::Component::IRC Time::SoFar YAML
+    cpanm POE::Component::IRC Time::SoFar YAML Proc::Daemon Time::Piece
     git clone git@github.com:troydm/shellbot.git
     mv ./config.example ./config
 
