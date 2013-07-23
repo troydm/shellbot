@@ -79,6 +79,10 @@ sub printl {
     print "[$date]$_[0]";
 }
 
+sub perl_version {
+    return join(".", map 0+$_, $] =~ /(\d+)\.(\d{3})(\d{3})/);
+}
+
 sub _start {
     my ($kernel, $heap) = @_[KERNEL ,HEAP];
 
@@ -380,10 +384,11 @@ sub msg_received {
             my $up = uptime();
             chomp $host;
             chomp $up;
+            my $perl_ver = perl_version();
             my $rt = runtime();
             my $ct = figuretimes(time()-$heap->{connecttime});
             my $ssl = exists($config->{sslcrt}) && exists($config->{sslkey}) ? ' securely' : '';
-            $irc->yield(privmsg => $priv, "shellbot v$VERSION running for $rt");
+            $irc->yield(privmsg => $priv, "shellbot v$VERSION running on Perl v$perl_ver for $rt");
             $irc->yield(privmsg => $priv, "connected$ssl to $config->{server} for $ct");
             $irc->yield(privmsg => $priv, "running on $host $up");
             if(exists($heap->{job})){
