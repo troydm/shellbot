@@ -250,10 +250,12 @@ sub msg_received {
             if($msg =~ /^\s*#end\s*/){
                 $commands->{$heap->{cmd}} = [$heap->{desc}, $heap->{code}];
                 DumpFile($config_file, ($config, $commands));
-                $irc->yield(privmsg => $priv, "$heap->{cmd} remembered");
+                $irc->yield(privmsg => $priv, "$heap->{cmd} saved");
                 delete $heap->{cmd};
                 delete $heap->{desc};
                 delete $heap->{code};
+            } elsif($msg =~ /^\s*#!(.*)/){
+                run_job $irc, $heap, $kernel, $priv, $1, '';
             } elsif($msg =~ /^\s*#canc(?:el)?\s*/){
                 $irc->yield(privmsg => $priv, "$heap->{cmd} canceled");
                 delete $heap->{cmd};
@@ -308,13 +310,14 @@ sub msg_received {
             $irc->yield(privmsg => $priv, "  !shell - run one line shell command");
             $irc->yield(privmsg => $priv, "  run command [args] - run remembered command");
             $irc->yield(privmsg => $priv, "  kill [signal] - kill running job");
-            $irc->yield(privmsg => $priv, "  remember|edit|ed command [desc] - start remembering command mode");
+            $irc->yield(privmsg => $priv, "  remember|edit|ed command [desc] - start edit command mode");
+            $irc->yield(privmsg => $priv, "    #!shell - run one line shell command in edit mode");
             $irc->yield(privmsg => $priv, "    #ed|#edit line shell - edit line");
             $irc->yield(privmsg => $priv, "    #ins|#insert line shell - insert at line");
             $irc->yield(privmsg => $priv, "    #del|#delete line - delete line");
-            $irc->yield(privmsg => $priv, "    #sh|#show - show remembered command so far");
-            $irc->yield(privmsg => $priv, "    #canc|#cancel - stop remembering command mode without saving command");
-            $irc->yield(privmsg => $priv, "    #end - stop remembering command mode and save command");
+            $irc->yield(privmsg => $priv, "    #sh|#show - show editing command so far");
+            $irc->yield(privmsg => $priv, "    #canc|#cancel - stop edit command mode without saving command");
+            $irc->yield(privmsg => $priv, "    #end - stop edit command mode and save command");
             $irc->yield(privmsg => $priv, "  show command - print remembered command");
             $irc->yield(privmsg => $priv, "  status - print bot status");
             $irc->yield(privmsg => $priv, "  nick nickname - change nick");
@@ -333,7 +336,7 @@ sub msg_received {
                 }else{
                     $heap->{code} = [];
                 }
-                $irc->yield(privmsg => $priv, "remembering $cmd $desc");
+                $irc->yield(privmsg => $priv, "now editing $cmd $desc");
             }else{
                 $irc->yield(privmsg => $priv, "please specify command name");
             }
