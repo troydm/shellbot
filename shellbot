@@ -138,10 +138,12 @@ sub irc_connected {
 }
 
 sub run_job {
-    my ($irc, $heap, $kernel, $channel, $cmd, $args) = @_;
+    my ($irc, $heap, $kernel, $channel, $shell, $cmd, $args) = @_;
 
     my $program = "/bin/bash";
-    if(exists($config->{'shell'})){
+    if($shell){
+        $program = $shell;
+    }elsif(exists($config->{'shell'})){
         $program = $config->{'shell'};
     }
 
@@ -248,29 +250,47 @@ sub msg_received {
         my $priv = ($channel ? $channel : $nick);
         if(exists($heap->{cmd})){
             if($msg =~ /^\s*#end\s*/){
-                $commands->{$heap->{cmd}} = [$heap->{desc}, $heap->{code}];
+                if($heap->{shell}){
+                    $commands->{$heap->{cmd}} = [$heap->{desc}, $heap->{code}, $heap->{shell}];
+                }else{
+                    $commands->{$heap->{cmd}} = [$heap->{desc}, $heap->{code}];
+                }
                 DumpFile($config_file, ($config, $commands));
                 $irc->yield(privmsg => $priv, "$heap->{cmd} saved");
                 delete $heap->{cmd};
                 delete $heap->{desc};
                 delete $heap->{code};
+                delete $heap->{shell};
             } elsif($msg =~ /^\s*#!(.*)/){
-                run_job $irc, $heap, $kernel, $priv, $1, '';
+                run_job $irc, $heap, $kernel, $priv, '', $1, '';
+            } elsif($msg =~ /^\s*#shell\s{1}(.*)/){
+                $heap->{shell} = $1;
+            } elsif($msg =~ /^\s*#desc\s{1}(.*)/){
+                $heap->{desc} = $1;
             } elsif($msg =~ /^\s*#canc(?:el)?\s*/){
                 $irc->yield(privmsg => $priv, "$heap->{cmd} canceled");
                 delete $heap->{cmd};
                 delete $heap->{desc};
                 delete $heap->{code};
+                delete $heap->{shell};
             } elsif($msg =~ /^\s*#sh\s*/){
+                $irc->yield(privmsg => $priv, "now editing");
+                $irc->yield(privmsg => $priv, "name: $heap->{cmd}");
+                $irc->yield(privmsg => $priv, "desc: $heap->{desc}");
+                if($heap->{shell}){
+                    $irc->yield(privmsg => $priv, "shell: $heap->{shell}");
+                }
                 if(@{ $heap->{code} } > 0){
+                    $irc->yield(privmsg => $priv, "code:");
                     my $i = 1;
                     foreach my $line (@{ $heap->{code} }){
                         $irc->yield(privmsg => $priv, "$i: $line");
                         $i++;
                     }
                 }else{
-                    $irc->yield(privmsg => $priv, "empty command");
+                    $irc->yield(privmsg => $priv, "code: empty");
                 }
+                $irc->yield(privmsg => $priv, "end");
             } elsif($msg =~ /^\s*#ed(?:it)?\s+(\d+)\s{1}(.*)/){
                 if($1 <= @{ $heap->{code} }){
                     $heap->{code}->[$1-1] = $2; 
@@ -311,11 +331,13 @@ sub msg_received {
         } elsif($msg =~ /^\s*help\s*/){
             $irc->yield(privmsg => $priv, "shellbot v$VERSION IRC bot help");
             $irc->yield(privmsg => $priv, "  ls|list|commands - list remembered commands");
-            $irc->yield(privmsg => $priv, "  !shell - run one line shell command");
+            $irc->yield(privmsg => $priv, "  !cmd - run one line shell command");
             $irc->yield(privmsg => $priv, "  run command [args] - run remembered command");
             $irc->yield(privmsg => $priv, "  kill [signal] - kill running job");
-            $irc->yield(privmsg => $priv, "  remember|edit|ed command [desc] - start edit command mode");
-            $irc->yield(privmsg => $priv, "    #!shell - run one line shell command in edit mode");
+            $irc->yield(privmsg => $priv, "  remember|edit|ed command - start edit command mode");
+            $irc->yield(privmsg => $priv, "    #!cmd - run one line command in edit mode");
+            $irc->yield(privmsg => $priv, "    #shell /path/to/shell/exe - change command's shell executable");
+            $irc->yield(privmsg => $priv, "    #desc description - change command's description");
             $irc->yield(privmsg => $priv, "    #ed|#edit line shell - edit line");
             $irc->yield(privmsg => $priv, "    #ins|#insert line shell - insert at line");
             $irc->yield(privmsg => $priv, "    #del|#delete line - delete line");
@@ -332,31 +354,44 @@ sub msg_received {
         } elsif($msg =~ /^\s*(?:edit|remember){1}\s+(.*)/){
             if($1 =~ /([^ ]+)\s*(.*)/){
                 my $cmd = $1;
-                my $desc = $2;
                 $heap->{cmd} = $cmd;
-                $heap->{desc} = $desc;
                 if(exists($commands->{$cmd})){
+                    $heap->{desc} = $commands->{$cmd}->[0];
                     $heap->{code} = [ map { $_; } @{ $commands->{$cmd}->[1] } ];
+                    if(@{ $commands->{$cmd} } > 2){
+                        $heap->{shell} = $commands->{$cmd}->[2];
+                    }else{
+                        $heap->{shell} = '';
+                    }
                 }else{
+                    $heap->{desc} = '';
                     $heap->{code} = [];
+                    $heap->{shell} = '';
                 }
-                $irc->yield(privmsg => $priv, "now editing $cmd $desc");
+                $irc->yield(privmsg => $priv, "now editing $cmd");
             }else{
                 $irc->yield(privmsg => $priv, "please specify command name");
             }
         } elsif($msg =~ /^\s*sh(?:ow)?\s+([^ ]+)/){
             my $cmd = $1;
             if(exists($commands->{$cmd})){
+                $irc->yield(privmsg => $priv, "name: $cmd");
+                $irc->yield(privmsg => $priv, "desc: $commands->{$cmd}->[0]");
+                if(@{ $commands->{$cmd} } > 2){
+                    $irc->yield(privmsg => $priv, "shell: $commands->{$cmd}->[2]");
+                }
                 my @code = @{ $commands->{$cmd}->[1] };
                 if(@code > 0){
+                    $irc->yield(privmsg => $priv, "code: ");
                     my $i = 1;
                     foreach my $line (@code){
                         $irc->yield(privmsg => $priv, "$i: $line");
                         $i++;
                     }
                 }else{
-                    $irc->yield(privmsg => $priv, "empty command");
+                    $irc->yield(privmsg => $priv, "code: empty");
                 }
+                $irc->yield(privmsg => $priv, "end");
             }else{
                 $irc->yield(privmsg => $priv, "no such command");
             }
@@ -364,8 +399,13 @@ sub msg_received {
             my $cmd = $1;
             my $args = $2;
             if(exists($commands->{$cmd})){
-                my @code = @{ $commands->{$cmd}->[1] };
-                run_job $irc, $heap, $kernel, $priv, \@code, $args;
+                my @cmd = @{ $commands->{$cmd} };
+                my @code = @{ $cmd[1] };
+                my $shell = '';
+                if(@cmd > 2){
+                    $shell = $cmd[2];
+                }
+                run_job $irc, $heap, $kernel, $priv, $shell, \@code, $args;
             }else{
                 $irc->yield(privmsg => $priv, "no such command");
             }
@@ -379,7 +419,7 @@ sub msg_received {
                 $irc->yield(privmsg => $priv, "no such command $cmd");
             }
         } elsif($msg =~ /^\s*!(.*)/){
-            run_job $irc, $heap, $kernel, $priv, $1, '';
+            run_job $irc, $heap, $kernel, $priv, '', $1, '';
         } elsif($msg =~ /^\s*kill(.*)/){
             kill_job $irc, $heap, $priv, $1;
         } elsif($msg =~ /^\s*nick\s+([^ ]*)/){
