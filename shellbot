@@ -301,7 +301,11 @@ sub msg_received {
             }else{
                 foreach my $command (keys %$commands){
                     my $desc = $commands->{$command}->[0];
-                    $irc->yield(privmsg => $priv, "$command $desc");
+                    if($desc){
+                        $irc->yield(privmsg => $priv, "$command - $desc");
+                    }else{
+                        $irc->yield(privmsg => $priv, "$command");
+                    }
                 }
             }
         } elsif($msg =~ /^\s*help\s*/){
